@@ -1,2 +1,3 @@
 # Charlie Renderer
-WIP Vulkan renderer. The name "Charlie" is a tribute to my cat Charlie.
+
+WIP Vulkan renderer. The name of this project is a tribute to my cat Charlie.

@@ -1,5 +1,5 @@
 use ash::{vk, Entry, Instance, Device};
-use ash::vk::{PhysicalDevice, PhysicalDeviceFeatures, PhysicalDeviceProperties, Queue};
+use ash::vk::{PhysicalDevice, PhysicalDeviceProperties, Queue};
 
 type DynResult<T> = Result<T, Box<dyn std::error::Error>>;
 
@@ -16,8 +16,7 @@ unsafe extern "system" fn vulkan_debug_utils_callback(
     vk::FALSE
 }
 
-fn create_instance() -> DynResult<Instance> {
-    let entry = Entry::linked();
+fn create_instance(entry: &Entry, window: &winit::window::Window) -> DynResult<Instance> {
     let app_info = vk::ApplicationInfo {
         api_version: vk::make_api_version(0, 1, 2, 0),
         ..Default::default()
@@ -29,8 +28,13 @@ fn create_instance() -> DynResult<Instance> {
         .iter()
         .map(|layer_name| layer_name.as_ptr())
         .collect();
-    let extension_name_pointers: Vec<*const i8> =
-        vec![ash::extensions::ext::DebugUtils::name().as_ptr()];
+
+    let extensions = {
+        let mut extensions = ash_window::enumerate_required_extensions(&window)?;
+        extensions.push(ash::extensions::ext::DebugUtils::name());
+        extensions
+    }.iter().map(|cstring| cstring.as_ptr()).collect::<Vec<_>>();
+
 
     let mut debugcreateinfo =
         vk::DebugUtilsMessengerCreateInfoEXT::builder()
@@ -47,7 +51,7 @@ fn create_instance() -> DynResult<Instance> {
         .push_next(&mut debugcreateinfo)
         .application_info(&app_info)
         .enabled_layer_names(&layer_name_pointers)
-        .enabled_extension_names(&extension_name_pointers);
+        .enabled_extension_names(&extensions);
 
     let instance = unsafe { entry.create_instance(&instance_create_info, None)? };
     Ok(instance)
@@ -60,7 +64,7 @@ fn find_physical_device(instance: &Instance) -> DynResult<(PhysicalDevice, Physi
             .iter()
             .map(|pd| (*pd, unsafe { instance.get_physical_device_properties(*pd) }));
     Ok(pd_properties_pairs.clone()
-        .find(|(pd, prop)| prop.device_type == vk::PhysicalDeviceType::DISCRETE_GPU) // Prefer Discrete
+        .find(|(_, prop)| prop.device_type == vk::PhysicalDeviceType::DISCRETE_GPU) // Prefer Discrete
         .or_else(|| pd_properties_pairs.next())
         .expect("Can't find a physical device"))
 }
@@ -98,26 +102,9 @@ fn find_queue_family_indices(instance: &Instance, physical_device: PhysicalDevic
     }
 }
 
-
-fn main() -> DynResult<()> {
-    let instance = create_instance()?;
-    let (physical_device, physical_device_properties) = find_physical_device(&instance)?;
-    let queue_family_indices =
-        find_queue_family_indices(&instance, physical_device);
-    let (logical_device, graphics_queue, transfer_queue)
-        = create_logical_device(&instance, physical_device, queue_family_indices)?;
-
-    let eventloop = winit::event_loop::EventLoop::new();
-    let window = winit::window::Window::new(&eventloop)?;
-
-    unsafe {
-        logical_device.destroy_device(None);
-        instance.destroy_instance(None);
-    };
-    Ok(())
-}
-
-fn create_logical_device(instance: &Instance, physical_device: PhysicalDevice, queue_family_indices: QueueFamilyIndices)
+fn create_logical_device(instance: &Instance,
+                         physical_device: PhysicalDevice,
+                         queue_family_indices: QueueFamilyIndices)
                          -> DynResult<(Device, Queue, Queue)> {
     let priorities = [1.0f32];
     let queue_infos = [
@@ -139,3 +126,37 @@ fn create_logical_device(instance: &Instance, physical_device: PhysicalDevice, q
     Ok((logical_device, graphics_queue, transfer_queue))
 }
 
+fn main() -> DynResult<()> {
+    let event_loop = winit::event_loop::EventLoop::new();
+    let window = winit::window::Window::new(&event_loop)?;
+
+    let entry = Entry::linked();
+
+    let instance = create_instance(&entry, &window)?;
+    let surface = unsafe { ash_window::create_surface(&entry, &instance, &window, None)? };
+    let surface_fn = ash::extensions::khr::Surface::new(&entry, &instance);
+    let (physical_device, _physical_device_properties) = find_physical_device(&instance)?;
+    let queue_family_indices =
+        find_queue_family_indices(&instance, physical_device);
+    let (logical_device, _graphics_queue, _transfer_queue)
+        = create_logical_device(&instance, physical_device, queue_family_indices)?;
+
+    event_loop.run(move |event, _, control_flow| {
+        *control_flow = winit::event_loop::ControlFlow::Wait;
+
+        match event {
+            winit::event::Event::WindowEvent {
+                event: winit::event::WindowEvent::CloseRequested,
+                window_id,
+            } if window_id == window.id() => {
+                unsafe {
+                    logical_device.destroy_device(None);
+                    surface_fn.destroy_surface(surface, None);
+                    instance.destroy_instance(None);
+                };
+                *control_flow = winit::event_loop::ControlFlow::Exit
+            }
+            _ => (),
+        }
+    });
+}
