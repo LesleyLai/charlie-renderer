@@ -1,5 +1,6 @@
 use ash::{vk, Entry, Instance, Device};
-use ash::vk::{PhysicalDevice, PhysicalDeviceProperties, Queue};
+use ash::extensions::khr::Surface;
+use ash::vk::{PhysicalDevice, Queue, SurfaceKHR};
 
 type DynResult<T> = Result<T, Box<dyn std::error::Error>>;
 
@@ -57,7 +58,7 @@ fn create_instance(entry: &Entry, window: &winit::window::Window) -> DynResult<I
     Ok(instance)
 }
 
-fn find_physical_device(instance: &Instance) -> DynResult<(PhysicalDevice, PhysicalDeviceProperties)> {
+fn find_physical_device(instance: &Instance) -> DynResult<PhysicalDevice> {
     let physical_devices = unsafe { instance.enumerate_physical_devices()? };
     let mut pd_properties_pairs =
         physical_devices
@@ -66,7 +67,9 @@ fn find_physical_device(instance: &Instance) -> DynResult<(PhysicalDevice, Physi
     Ok(pd_properties_pairs.clone()
         .find(|(_, prop)| prop.device_type == vk::PhysicalDeviceType::DISCRETE_GPU) // Prefer Discrete
         .or_else(|| pd_properties_pairs.next())
-        .expect("Can't find a physical device"))
+        .expect("Can't find a physical device")
+        .0
+    )
 }
 
 struct QueueFamilyIndices {
@@ -74,8 +77,11 @@ struct QueueFamilyIndices {
     transfer: u32,
 }
 
-fn find_queue_family_indices(instance: &Instance, physical_device: PhysicalDevice)
-                             -> QueueFamilyIndices {
+fn find_queue_family_indices(instance: &Instance,
+                             physical_device: PhysicalDevice,
+                             surface: SurfaceKHR,
+                             surface_fn: &Surface)
+                             -> DynResult<QueueFamilyIndices> {
     let queue_family_properties =
         unsafe { instance.get_physical_device_queue_family_properties(physical_device) };
     {
@@ -83,7 +89,10 @@ fn find_queue_family_indices(instance: &Instance, physical_device: PhysicalDevic
         let mut transfer_qf_index_opt = None;
         for (index, qfam) in queue_family_properties.iter().enumerate() {
             if qfam.queue_count > 0 {
-                if qfam.queue_flags.contains(vk::QueueFlags::GRAPHICS) {
+                if qfam.queue_flags.contains(vk::QueueFlags::GRAPHICS) && unsafe {
+                    surface_fn
+                        .get_physical_device_surface_support(physical_device, index as u32, surface)?
+                } {
                     graphics_qf_index_opt = Some(index as u32);
                 }
                 if qfam.queue_flags.contains(vk::QueueFlags::TRANSFER) {
@@ -95,16 +104,16 @@ fn find_queue_family_indices(instance: &Instance, physical_device: PhysicalDevic
                 }
             }
         }
-        QueueFamilyIndices {
+        Ok(QueueFamilyIndices {
             graphics: graphics_qf_index_opt.unwrap(),
             transfer: transfer_qf_index_opt.unwrap(),
-        }
+        })
     }
 }
 
 fn create_logical_device(instance: &Instance,
                          physical_device: PhysicalDevice,
-                         queue_family_indices: QueueFamilyIndices)
+                         queue_family_indices: &QueueFamilyIndices)
                          -> DynResult<(Device, Queue, Queue)> {
     let priorities = [1.0f32];
     let queue_infos = [
@@ -117,8 +126,10 @@ fn create_logical_device(instance: &Instance,
             .queue_priorities(&priorities)
             .build(),
     ];
+    let extensions: Vec<*const i8> = vec![ash::extensions::khr::Swapchain::name().as_ptr()];
     let device_create_info = vk::DeviceCreateInfo::builder()
-        .queue_create_infos(&queue_infos);
+        .queue_create_infos(&queue_infos)
+        .enabled_extension_names(&extensions);
     let logical_device =
         unsafe { instance.create_device(physical_device, &device_create_info, None)? };
     let graphics_queue = unsafe { logical_device.get_device_queue(queue_family_indices.graphics, 0) };
@@ -135,11 +146,39 @@ fn main() -> DynResult<()> {
     let instance = create_instance(&entry, &window)?;
     let surface = unsafe { ash_window::create_surface(&entry, &instance, &window, None)? };
     let surface_fn = ash::extensions::khr::Surface::new(&entry, &instance);
-    let (physical_device, _physical_device_properties) = find_physical_device(&instance)?;
+    let physical_device = find_physical_device(&instance)?;
     let queue_family_indices =
-        find_queue_family_indices(&instance, physical_device);
+        find_queue_family_indices(&instance, physical_device, surface, &surface_fn)?;
     let (logical_device, _graphics_queue, _transfer_queue)
-        = create_logical_device(&instance, physical_device, queue_family_indices)?;
+        = create_logical_device(&instance, physical_device, &queue_family_indices)?;
+
+    let surface_capabilities = unsafe {
+        surface_fn.get_physical_device_surface_capabilities(physical_device, surface)?
+    };
+    let surface_formats = unsafe {
+        surface_fn.get_physical_device_surface_formats(physical_device, surface)?
+    };
+
+    let queuefamilies = [queue_family_indices.graphics];
+    let swapchain_create_info = vk::SwapchainCreateInfoKHR::builder()
+        .surface(surface)
+        .min_image_count(
+            3.max(surface_capabilities.min_image_count)
+                .min(surface_capabilities.max_image_count),
+        )
+        .image_format(surface_formats.first().unwrap().format)
+        .image_color_space(surface_formats.first().unwrap().color_space)
+        .image_extent(surface_capabilities.current_extent)
+        .image_array_layers(1)
+        .image_usage(vk::ImageUsageFlags::COLOR_ATTACHMENT)
+        .image_sharing_mode(vk::SharingMode::EXCLUSIVE)
+        .queue_family_indices(&queuefamilies)
+        .pre_transform(surface_capabilities.current_transform)
+        .composite_alpha(vk::CompositeAlphaFlagsKHR::OPAQUE)
+        .present_mode(vk::PresentModeKHR::FIFO);
+    let swapchain_loader = ash::extensions::khr::Swapchain::new(&instance, &logical_device);
+    let _swapchain = unsafe { swapchain_loader.create_swapchain(&swapchain_create_info, None)? };
+
 
     event_loop.run(move |event, _, control_flow| {
         *control_flow = winit::event_loop::ControlFlow::Wait;
