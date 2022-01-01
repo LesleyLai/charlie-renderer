@@ -7,3 +7,4 @@ edition = "2018"
 
 [dependencies]
 ash = { version = "0.35.0", default-features = false, features = ["linked", "debug"] }
+winit = "0.26.0"

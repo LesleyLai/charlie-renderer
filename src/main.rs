@@ -1,5 +1,5 @@
-use ash::{vk, Entry, Instance};
-use ash::vk::{PhysicalDevice, PhysicalDeviceFeatures, PhysicalDeviceProperties};
+use ash::{vk, Entry, Instance, Device};
+use ash::vk::{PhysicalDevice, PhysicalDeviceFeatures, PhysicalDeviceProperties, Queue};
 
 type DynResult<T> = Result<T, Box<dyn std::error::Error>>;
 
@@ -53,24 +53,89 @@ fn create_instance() -> DynResult<Instance> {
     Ok(instance)
 }
 
-
 fn find_physical_device(instance: &Instance) -> DynResult<(PhysicalDevice, PhysicalDeviceProperties)> {
     let physical_devices = unsafe { instance.enumerate_physical_devices()? };
-    let pd_properties_pairs =
+    let mut pd_properties_pairs =
         physical_devices
             .iter()
             .map(|pd| (*pd, unsafe { instance.get_physical_device_properties(*pd) }));
     Ok(pd_properties_pairs.clone()
         .find(|(pd, prop)| prop.device_type == vk::PhysicalDeviceType::DISCRETE_GPU) // Prefer Discrete
-        .or_else(|| pd_properties_pairs.clone().next())
+        .or_else(|| pd_properties_pairs.next())
         .expect("Can't find a physical device"))
 }
+
+struct QueueFamilyIndices {
+    graphics: u32,
+    transfer: u32,
+}
+
+fn find_queue_family_indices(instance: &Instance, physical_device: PhysicalDevice)
+                             -> QueueFamilyIndices {
+    let queue_family_properties =
+        unsafe { instance.get_physical_device_queue_family_properties(physical_device) };
+    {
+        let mut graphics_qf_index_opt = None;
+        let mut transfer_qf_index_opt = None;
+        for (index, qfam) in queue_family_properties.iter().enumerate() {
+            if qfam.queue_count > 0 {
+                if qfam.queue_flags.contains(vk::QueueFlags::GRAPHICS) {
+                    graphics_qf_index_opt = Some(index as u32);
+                }
+                if qfam.queue_flags.contains(vk::QueueFlags::TRANSFER) {
+                    if transfer_qf_index_opt.is_none()
+                        || !qfam.queue_flags.contains(vk::QueueFlags::GRAPHICS)
+                    {
+                        transfer_qf_index_opt = Some(index as u32);
+                    }
+                }
+            }
+        }
+        QueueFamilyIndices {
+            graphics: graphics_qf_index_opt.unwrap(),
+            transfer: transfer_qf_index_opt.unwrap(),
+        }
+    }
+}
+
 
 fn main() -> DynResult<()> {
     let instance = create_instance()?;
     let (physical_device, physical_device_properties) = find_physical_device(&instance)?;
+    let queue_family_indices =
+        find_queue_family_indices(&instance, physical_device);
+    let (logical_device, graphics_queue, transfer_queue)
+        = create_logical_device(&instance, physical_device, queue_family_indices)?;
 
+    let eventloop = winit::event_loop::EventLoop::new();
+    let window = winit::window::Window::new(&eventloop)?;
 
-    unsafe { instance.destroy_instance(None) };
+    unsafe {
+        logical_device.destroy_device(None);
+        instance.destroy_instance(None);
+    };
     Ok(())
 }
+
+fn create_logical_device(instance: &Instance, physical_device: PhysicalDevice, queue_family_indices: QueueFamilyIndices)
+                         -> DynResult<(Device, Queue, Queue)> {
+    let priorities = [1.0f32];
+    let queue_infos = [
+        vk::DeviceQueueCreateInfo::builder()
+            .queue_family_index(queue_family_indices.graphics)
+            .queue_priorities(&priorities)
+            .build(),
+        vk::DeviceQueueCreateInfo::builder()
+            .queue_family_index(queue_family_indices.transfer)
+            .queue_priorities(&priorities)
+            .build(),
+    ];
+    let device_create_info = vk::DeviceCreateInfo::builder()
+        .queue_create_infos(&queue_infos);
+    let logical_device =
+        unsafe { instance.create_device(physical_device, &device_create_info, None)? };
+    let graphics_queue = unsafe { logical_device.get_device_queue(queue_family_indices.graphics, 0) };
+    let transfer_queue = unsafe { logical_device.get_device_queue(queue_family_indices.transfer, 0) };
+    Ok((logical_device, graphics_queue, transfer_queue))
+}
+
