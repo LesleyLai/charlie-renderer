@@ -1,5 +1,7 @@
 use ash::{vk, Entry, Instance, Device};
 use ash::extensions::khr;
+use ash::extensions::khr::{Surface, Swapchain};
+use ash::vk::{CommandPoolCreateFlags, Image, ImageView, PhysicalDevice, SurfaceKHR, SwapchainKHR};
 use winit::window::Window;
 
 use crate::dyn_result::DynResult;
@@ -132,6 +134,61 @@ fn create_device(instance: &Instance,
     Ok(unsafe { instance.create_device(physical_device, &device_create_info, None) }?)
 }
 
+
+fn create_swapchain(instance: &Instance,
+                    surface: SurfaceKHR,
+                    surface_fn: &Surface,
+                    physical_device: PhysicalDevice,
+                    queue_family_indices: &QueueFamilyIndices,
+                    device: &Device)
+                    -> DynResult<(Swapchain, SwapchainKHR, Vec<Image>, Vec<ImageView>)> {
+    let surface_capabilities = unsafe {
+        surface_fn.get_physical_device_surface_capabilities(physical_device, surface)?
+    };
+    let surface_formats = unsafe {
+        surface_fn.get_physical_device_surface_formats(physical_device, surface)?
+    };
+
+    let swapcahin_queue_family_indices = [queue_family_indices.graphics];
+    let swapchain_create_info = vk::SwapchainCreateInfoKHR::builder()
+        .surface(surface)
+        .min_image_count(
+            3.max(surface_capabilities.min_image_count)
+                .min(surface_capabilities.max_image_count),
+        )
+        .image_format(surface_formats.first().unwrap().format)
+        .image_color_space(surface_formats.first().unwrap().color_space)
+        .image_extent(surface_capabilities.current_extent)
+        .image_array_layers(1)
+        .image_usage(vk::ImageUsageFlags::COLOR_ATTACHMENT)
+        .image_sharing_mode(vk::SharingMode::EXCLUSIVE)
+        .queue_family_indices(&swapcahin_queue_family_indices)
+        .pre_transform(surface_capabilities.current_transform)
+        .composite_alpha(vk::CompositeAlphaFlagsKHR::OPAQUE)
+        .present_mode(vk::PresentModeKHR::FIFO);
+    let swapchain_loader = khr::Swapchain::new(&instance, &device);
+    let swapchain = unsafe { swapchain_loader.create_swapchain(&swapchain_create_info, None)? };
+    let swapchain_images = unsafe { swapchain_loader.get_swapchain_images(swapchain)? };
+    let swapchain_image_views =
+        swapchain_images.iter().map(
+            |image| {
+                let subresource_range = vk::ImageSubresourceRange::builder()
+                    .aspect_mask(vk::ImageAspectFlags::COLOR)
+                    .base_mip_level(0)
+                    .level_count(1)
+                    .base_array_layer(0)
+                    .layer_count(1);
+                let imageview_create_info = vk::ImageViewCreateInfo::builder()
+                    .image(*image)
+                    .view_type(vk::ImageViewType::TYPE_2D)
+                    .format(vk::Format::B8G8R8A8_UNORM)
+                    .subresource_range(*subresource_range);
+                unsafe { device.create_image_view(&imageview_create_info, None) }.unwrap()
+            }
+        ).collect::<Vec<_>>();
+    Ok((swapchain_loader, swapchain, swapchain_images, swapchain_image_views))
+}
+
 pub struct Renderer {
     entry: Entry,
     instance: Instance,
@@ -146,6 +203,9 @@ pub struct Renderer {
     swapchain: vk::SwapchainKHR,
     swapchain_images: Vec<vk::Image>,
     swapchain_image_views: Vec<vk::ImageView>,
+
+    graphics_command_pool: vk::CommandPool,
+    main_graphics_command_buffer: vk::CommandBuffer,
 }
 
 impl Renderer {
@@ -162,50 +222,22 @@ impl Renderer {
         let graphics_queue = unsafe { device.get_device_queue(queue_family_indices.graphics, 0) };
         let transfer_queue = unsafe { device.get_device_queue(queue_family_indices.transfer, 0) };
 
-        let surface_capabilities = unsafe {
-            surface_fn.get_physical_device_surface_capabilities(physical_device, surface)?
-        };
-        let surface_formats = unsafe {
-            surface_fn.get_physical_device_surface_formats(physical_device, surface)?
-        };
+        let (swapchain_loader, swapchain, swapchain_images, swapchain_image_views) =
+            create_swapchain(&instance, surface, &surface_fn, physical_device, &queue_family_indices, &device)?;
 
-        let swapcahin_queue_family_indices = [queue_family_indices.graphics];
-        let swapchain_create_info = vk::SwapchainCreateInfoKHR::builder()
-            .surface(surface)
-            .min_image_count(
-                3.max(surface_capabilities.min_image_count)
-                    .min(surface_capabilities.max_image_count),
-            )
-            .image_format(surface_formats.first().unwrap().format)
-            .image_color_space(surface_formats.first().unwrap().color_space)
-            .image_extent(surface_capabilities.current_extent)
-            .image_array_layers(1)
-            .image_usage(vk::ImageUsageFlags::COLOR_ATTACHMENT)
-            .image_sharing_mode(vk::SharingMode::EXCLUSIVE)
-            .queue_family_indices(&swapcahin_queue_family_indices)
-            .pre_transform(surface_capabilities.current_transform)
-            .composite_alpha(vk::CompositeAlphaFlagsKHR::OPAQUE)
-            .present_mode(vk::PresentModeKHR::FIFO);
-        let swapchain_loader = khr::Swapchain::new(&instance, &device);
-        let swapchain = unsafe { swapchain_loader.create_swapchain(&swapchain_create_info, None)? };
-        let swapchain_images = unsafe { swapchain_loader.get_swapchain_images(swapchain)? };
-        let swapchain_image_views =
-            swapchain_images.iter().map(
-                |image| {
-                    let subresource_range = vk::ImageSubresourceRange::builder()
-                        .aspect_mask(vk::ImageAspectFlags::COLOR)
-                        .base_mip_level(0)
-                        .level_count(1)
-                        .base_array_layer(0)
-                        .layer_count(1);
-                    let imageview_create_info = vk::ImageViewCreateInfo::builder()
-                        .image(*image)
-                        .view_type(vk::ImageViewType::TYPE_2D)
-                        .format(vk::Format::B8G8R8A8_UNORM)
-                        .subresource_range(*subresource_range);
-                    unsafe { device.create_image_view(&imageview_create_info, None) }.unwrap()
-                }
-            ).collect::<Vec<_>>();
+        let command_pool_create_info =
+            vk::CommandPoolCreateInfo::builder()
+                .queue_family_index(queue_family_indices.graphics)
+                .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER);
+        let graphics_command_pool = unsafe { device.create_command_pool(&command_pool_create_info, None)? };
+
+        let command_buffer_allocate_info =
+            vk::CommandBufferAllocateInfo::builder()
+                .command_pool(graphics_command_pool)
+                .command_buffer_count(1)
+                .level(vk::CommandBufferLevel::PRIMARY);
+        let main_graphics_command_buffer =
+            unsafe { device.allocate_command_buffers(&command_buffer_allocate_info) }?[0];
 
         Ok(Renderer {
             entry,
@@ -221,6 +253,8 @@ impl Renderer {
             swapchain,
             swapchain_images,
             swapchain_image_views,
+            graphics_command_pool,
+            main_graphics_command_buffer,
         })
     }
 }
@@ -228,6 +262,8 @@ impl Renderer {
 impl Drop for Renderer {
     fn drop(&mut self) {
         unsafe {
+            self.device.destroy_command_pool(self.graphics_command_pool, None);
+
             self.swapchain_image_views.iter().for_each(
                 |image_view| self.device.destroy_image_view(*image_view, None)
             );
