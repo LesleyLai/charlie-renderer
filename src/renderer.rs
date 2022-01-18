@@ -7,7 +7,12 @@ use ash::{vk, Device, Entry, Instance};
 use std::ffi::CStr;
 use winit::window::Window;
 
+use vk_shader_macros::include_glsl;
+
 use crate::dyn_result::DynResult;
+
+const TRIANGLE_VERT: &[u32] = include_glsl!("shaders/triangle.vert");
+const TRIANGLE_FRAG: &[u32] = include_glsl!("shaders/triangle.frag");
 
 unsafe extern "system" fn vulkan_debug_utils_callback(
     message_severity: vk::DebugUtilsMessageSeverityFlagsEXT,
@@ -285,6 +290,19 @@ impl Renderer {
         let fence_create_info =
             vk::FenceCreateInfo::builder().flags(vk::FenceCreateFlags::SIGNALED);
         let render_fence = unsafe { device.create_fence(&fence_create_info, None) }?;
+
+        let vert_shader_create_info = vk::ShaderModuleCreateInfo::builder().code(TRIANGLE_VERT);
+        let triangle_vert_shader =
+            unsafe { device.create_shader_module(&vert_shader_create_info, None) }?;
+
+        let frag_shader_create_info = vk::ShaderModuleCreateInfo::builder().code(TRIANGLE_FRAG);
+        let triangle_frag_shader =
+            unsafe { device.create_shader_module(&frag_shader_create_info, None) }?;
+
+        unsafe {
+            device.destroy_shader_module(triangle_vert_shader, None);
+            device.destroy_shader_module(triangle_frag_shader, None);
+        }
 
         Ok(Renderer {
             entry,
